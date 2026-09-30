@@ -6,6 +6,7 @@ import {
   decodeDmaChannels,
   decodeI2sFormat,
   emitAudioPacket,
+  fillMicrophoneClip,
   transferDurationMs,
 } from "../public/wasm/i2s.js";
 
@@ -84,4 +85,25 @@ test('acknowledges DMA IRQs before the next PCM deadline', async () => {
   audio._pumpRx=()=>assert.fail('RX deadline has not arrived');
   assert.equal(audio.pump(101),0);
   assert.deepEqual(acknowledged,[0,1,2]);
+});
+
+test("fills microphone DMA from a clip with rate conversion and silence after the end", () => {
+  const clip = Int16Array.from([100, -200, 300, -400]);
+  const read = (bytes) => Array.from(new Int16Array(bytes.buffer));
+
+  // Same rate, mono: samples copied as little-endian PCM16.
+  const mono = new Uint8Array(8);
+  assert.equal(fillMicrophoneClip(mono, clip, 16000, 0, { sampleRate: 16000, channels: 1 }), 4);
+  assert.deepEqual(read(mono), [100, -200, 300, -400]);
+
+  // 8 kHz clip into a 16 kHz stereo slot: each sample held for two frames,
+  // duplicated on both channels.
+  const stereo = new Uint8Array(16);
+  assert.equal(fillMicrophoneClip(stereo, clip, 8000, 0, { sampleRate: 16000, channels: 2 }), 2);
+  assert.deepEqual(read(stereo), [100, 100, 100, 100, -200, -200, -200, -200]);
+
+  // Past the end of the clip the microphone is silent.
+  const tail = new Uint8Array(6);
+  assert.equal(fillMicrophoneClip(tail, clip, 16000, 3, { sampleRate: 16000, channels: 1 }), 6);
+  assert.deepEqual(read(tail), [-400, 0, 0]);
 });

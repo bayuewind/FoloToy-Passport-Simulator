@@ -19,6 +19,12 @@ let emulator;
 let board;
 let network;
 let networkDebugEnabled = false;
+// "wall" (default) paces I2S DMA by browser time. "emulated" paces it by the
+// guest CPU clock (cycles / 160 MHz) so firmware doing real-time audio work
+// (e.g. XiaoZhi Opus encoding) is not flooded with microphone samples when the
+// emulator runs slower than real time. Opt in with ?audioClock=emulated.
+let audioClock = "wall";
+const CPU_HZ_PER_MS = 160_000;
 let running = false;
 let generation = 0;
 let lastDebugAt = 0;
@@ -199,7 +205,9 @@ function runLoop(currentGeneration) {
     }
     serviceButtonTransitions();
     board.drain({ flushFrame: false });
-    board.pumpAudio(performance.now());
+    board.pumpAudio(audioClock === "emulated"
+      ? Number(emulator.cycles()) / CPU_HZ_PER_MS
+      : performance.now());
     network?.drain();
     if (emulator.needs_restart()) restart();
   }
@@ -223,6 +231,7 @@ self.addEventListener("message", async (event) => {
   try {
     switch (event.data.type) {
       case "start":
+        audioClock = event.data.audioClock === "emulated" ? "emulated" : "wall";
         await start(event.data.firmware, event.data.networkDebug);
         break;
       case "button":
@@ -238,6 +247,12 @@ self.addEventListener("message", async (event) => {
         buttonTransitions = [];
         buttonBusyUntil = emulator?.cycles() ?? 0;
         board?.releaseButtons();
+        break;
+      case "microphone-file":
+        board?.audio.setMicrophoneFile(
+          new Int16Array(event.data.bytes),
+          event.data.sampleRate,
+        );
         break;
       case "microphone":
         board?.pushMicrophone(event.data.bytes);

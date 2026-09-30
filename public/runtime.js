@@ -6,6 +6,12 @@ export class QemuRuntime extends EventTarget {
   #ready = false;
   #manifest = null;
   #networkDebug = false;
+  #audioClock;
+
+  constructor({ audioClock = "wall" } = {}) {
+    super();
+    this.#audioClock = audioClock;
+  }
 
   async start(firmwareUrl) {
     this.#ready = false;
@@ -95,6 +101,7 @@ export class QemuRuntime extends EventTarget {
       type: "start",
       firmware,
       networkDebug: this.#networkDebug,
+      audioClock: this.#audioClock,
     };
     this.#worker.postMessage(message, [firmware]);
   }
@@ -124,6 +131,16 @@ export class QemuRuntime extends EventTarget {
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     this.#worker.postMessage({ type: "microphone", bytes: data }, [data.buffer]);
     return true;
+  }
+
+  // Test drivers: play a PCM16 mono clip into the microphone at the rate the
+  // guest consumes it (see Esp32C3I2S.setMicrophoneFile).
+  sendMicrophoneFile(bytes, sampleRate) {
+    const data = new Uint8Array(bytes);
+    this.#worker?.postMessage(
+      { type: "microphone-file", bytes: data.buffer, sampleRate },
+      [data.buffer],
+    );
   }
 
   sendUart(bytes) {

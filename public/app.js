@@ -22,7 +22,10 @@ const DOUBLE_CLICK_WINDOW_MS = 300;
 const LONG_PRESS_MS = 300;
 
 
-const runtime = new QemuRuntime();
+const runtime = new QemuRuntime({
+  audioClock: new URLSearchParams(window.location.search).get("audioClock") === "emulated"
+    ? "emulated" : "wall",
+});
 const audio = new BrowserAudio((bytes) => runtime.sendMicrophone(bytes));
 const display = document.querySelector("#qemu-display");
 const context = display.getContext("2d", { alpha: false });
@@ -1025,6 +1028,14 @@ window.addEventListener("blur", () => {
   for (const key of heldKeyboardButtons) finishButtonPress(key, true);
   heldKeyboardButtons.clear();
 });
+
+// Hook for automated test drivers (Playwright etc.); unused by the page itself.
+window.__simTest = {
+  micFile: (base64, sampleRate) => runtime.sendMicrophoneFile(
+    Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)),
+    sampleRate,
+  ),
+};
 
 buildRegisterGrid();
 renderUartConsole();

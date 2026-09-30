@@ -115,6 +115,24 @@ function advanceDmaDeadline(previous, now, intervalMs) {
   return previous + intervalMs;
 }
 
+// Fills `target` with 16-bit little-endian PCM frames taken from a mono clip
+// (nearest-sample resampling, duplicated across channels) starting at clip
+// position `position`; silence past the end. Returns the next position.
+function fillMicrophoneClip(target, clip, clipRate, position, format) {
+  const frameBytes = 2 * format.channels;
+  const step = clipRate / format.sampleRate;
+  const view = new DataView(target.buffer, target.byteOffset, target.byteLength);
+  for (let offset = 0; offset + frameBytes <= target.byteLength; offset += frameBytes) {
+    const index = Math.floor(position);
+    const sample = index < clip.length ? clip[index] : 0;
+    position += step;
+    for (let channel = 0; channel < format.channels; channel += 1) {
+      view.setInt16(offset + channel * 2, sample, true);
+    }
+  }
+  return position;
+}
+
 function emitAudioPacket(onAudio, packet) {
   const byteLength = packet.bytes.byteLength;
   onAudio(packet);
@@ -177,7 +195,18 @@ export class Esp32C3I2S {
     this.volume = Math.max(0, Math.min(100, volume));
   }
 
+  // Test hook: play a PCM16 mono clip into the microphone once, at the rate
+  // the guest actually consumes RX DMA, then silence. Deterministic input for
+  // automated tests; live microphone input is ignored while a clip is set.
+  setMicrophoneFile(samples, sampleRate) {
+    this.micFile = samples;
+    this.micFileRate = sampleRate;
+    this.micFilePos = 0;
+    this.microphone = [];
+  }
+
   pushMicrophone(bytes) {
+    if (this.micFile) return;
     const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     for (const value of input) this.microphone.push(value);
   }
@@ -194,7 +223,7 @@ export class Esp32C3I2S {
       // Leaving a cleared level asserted until then traps the CPU in its ISR.
       if (this._serviceDmaIrq(channel)) continue;
       if (txReady) txBytes += this._pumpTx(channel, txFormat);
-      if (rxReady) rxBytes += this._pumpRx(channel);
+      if (rxReady) rxBytes += this._pumpRx(channel, rxFormat);
     }
     const txDelayMs = transferDurationMs(txBytes, txFormat);
     const rxDelayMs = transferDurationMs(rxBytes, rxFormat);
@@ -261,7 +290,7 @@ export class Esp32C3I2S {
     });
   }
 
-  _pumpRx(channel) {
+  _pumpRx(channel, format) {
     if (!(this._i2sRegister(I2S_RX_CONF) & I2S_START)) return 0;
     const channelBase = this._channelBase(channel);
     if (this._memory().getUint32(channelBase + 16, true) !==
@@ -278,11 +307,23 @@ export class Esp32C3I2S {
     const item = this._readDescriptor(descriptor);
     if (!item.fields.owner || item.fields.size === 0) return 0;
 
-    for (let offset = 0; offset < item.fields.size; offset += 1) {
-      this._writeGuest8(
-        item.buffer + offset,
-        this.microphone.length ? this.microphone.shift() : 0,
-      );
+    if (this.micFile && format) {
+      // Full-duplex ES8311 shares BCLK/WS with TX, so the RX clock divider
+      // registers do not reflect the real rate; prefer the TX format.
+      const tx = this._format('tx');
+      const bytes = new Uint8Array(item.fields.size);
+      this.micFilePos = fillMicrophoneClip(bytes, this.micFile, this.micFileRate, this.micFilePos,
+        tx.sampleRate ? tx : format);
+      for (let offset = 0; offset < bytes.length; offset += 1) {
+        this._writeGuest8(item.buffer + offset, bytes[offset]);
+      }
+    } else {
+      for (let offset = 0; offset < item.fields.size; offset += 1) {
+        this._writeGuest8(
+          item.buffer + offset,
+          this.microphone.length ? this.microphone.shift() : 0,
+        );
+      }
     }
     this._writeGuest32(
       descriptor,
@@ -430,6 +471,7 @@ export {
   decodeI2sFormat,
   descriptorFields,
   emitAudioPacket,
+  fillMicrophoneClip,
   replaceDescriptorLength,
   transferDurationMs,
 };
